@@ -7,7 +7,7 @@ Usage:
     standup.py              # normal run (what the timer launches)
     standup.py --dry-run    # print the message; send nothing, don't move the checkpoint
     standup.py --since 2026-10-10T00:00   # force the start of the time window
-    standup.py --force      # run even on a weekend
+    standup.py --force      # run even on a day off (weekend, holiday) or during a pause
     standup.py --no-checkpoint   # send a test without changing the next report's window
 """
 
@@ -24,7 +24,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 CONFIG_PATH = Path(os.environ.get("STANDUP_CONFIG", "~/.config/standup-bot/config.env")).expanduser()
@@ -58,15 +58,75 @@ def csv(value: str) -> list[str]:
 
 # ---------------------------------------------------------------- time window
 
-def previous_workday_start(now: datetime) -> datetime:
-    """Start (00:00) of the previous workday. On Monday it returns Friday."""
+class Calendar:
+    """Workdays: Monday to Friday, minus public holidays of ANY configured country.
+
+    Holidays come from the `holidays` package, which already implements moving rules such as
+    Ecuador's (Saturday -> Friday, Sunday -> Monday, Tuesday -> Monday, Wed/Thu -> Friday).
+    Government decrees that move a holiday on short notice aren't predictable, so they go
+    in EXTRA_DAYS_OFF / EXTRA_WORKDAYS.
+    """
+
+    def __init__(self, countries: list[str], extra_off: list[str], extra_work: list[str]) -> None:
+        self.countries = countries
+        self.extra_off = {date.fromisoformat(d): "Extra day off" for d in extra_off}
+        self.extra_work = {date.fromisoformat(d) for d in extra_work}
+        self.error: str | None = None
+        self._cache: dict[int, dict[date, str]] = {}
+
+    def _year(self, year: int) -> dict[date, str]:
+        if year in self._cache:
+            return self._cache[year]
+        days: dict[date, str] = {}
+        try:
+            import holidays  # optional: without it only weekends are skipped
+        except ImportError:
+            self.error = "python package 'holidays' is not installed; holidays are ignored"
+            self._cache[year] = days
+            return days
+        for country in self.countries:
+            for day, name in moved_holidays(holidays.country_holidays(country, years=year)).items():
+                days[day] = f"{days[day]}, " if day in days else ""
+                days[day] += f"{country}: {name}"
+        self._cache[year] = days
+        return days
+
+    def day_off(self, day: date) -> str | None:
+        """Why `day` is not a workday, or None if it is one."""
+        if day in self.extra_work:
+            return None
+        if day.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            return "Weekend"
+        return self.extra_off.get(day) or self._year(day.year).get(day)
+
+
+def moved_holidays(calendar: dict[date, str]) -> dict[date, str]:
+    """Holidays as actually taken: when one is moved, the original date is a workday again.
+
+    The package lists both the original date and the "(observed)" one, e.g. Ecuador 2027:
+    Tue Aug 10 and Mon Aug 9 (observed). Only the observed day is off.
+    """
+    days = {day: name.split("; ") for day, name in calendar.items()}
+    for day, names in list(days.items()):
+        for name in names:
+            if not name.endswith(" (observed)"):
+                continue
+            original = name.removesuffix(" (observed)")
+            for other in (day + timedelta(days=n) for n in range(-7, 8) if n):
+                if original in days.get(other, []) and other.weekday() < 5:
+                    days[other].remove(original)
+    return {day: "; ".join(n.removesuffix(" (observed)") for n in names) for day, names in days.items() if names}
+
+
+def previous_workday_start(now: datetime, calendar: Calendar) -> datetime:
+    """Start (00:00) of the previous workday. On Monday it returns Friday, skipping holidays."""
     day = now - timedelta(days=1)
-    while day.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+    while calendar.day_off(day.date()):
         day -= timedelta(days=1)
     return day.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def resolve_since(arg: str | None, now: datetime) -> datetime:
+def resolve_since(arg: str | None, now: datetime, calendar: Calendar) -> datetime:
     if arg:
         return datetime.fromisoformat(arg).astimezone()
     if STATE_PATH.exists():
@@ -74,7 +134,7 @@ def resolve_since(arg: str | None, now: datetime) -> datetime:
             return datetime.fromisoformat(STATE_PATH.read_text().strip())
         except ValueError:
             pass
-    return previous_workday_start(now)
+    return previous_workday_start(now, calendar)
 
 
 def save_checkpoint(now: datetime) -> None:
@@ -351,27 +411,31 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true", help="print instead of sending")
     parser.add_argument("--since", help="start of the time window (ISO 8601)")
-    parser.add_argument("--force", action="store_true", help="run even on a weekend")
+    parser.add_argument("--force", action="store_true", help="run even on a day off or during a pause")
     parser.add_argument("--no-checkpoint", action="store_true",
                         help="send without moving the window (for manual tests)")
     parser.add_argument("--no-llm", action="store_true", help="use the plain template only")
     args = parser.parse_args()
 
     now = datetime.now().astimezone()
-    if now.weekday() >= 5 and not args.force:
-        # The timer only fires Mon-Fri, but Persistent=true can catch up a missed
-        # Friday run when the PC boots on Saturday. We don't want that.
-        print("Weekend: no standup.")
+    cfg = load_config()
+    calendar = Calendar(csv(cfg.get("HOLIDAY_COUNTRIES", "")), csv(cfg.get("EXTRA_DAYS_OFF", "")),
+                        csv(cfg.get("EXTRA_WORKDAYS", "")))
+    reason = calendar.day_off(now.date())
+    if reason and not args.force:
+        # The timer only fires Mon-Fri, but Persistent=true can catch up a missed Friday run
+        # on Saturday, and holidays need this check anyway. The checkpoint stays put, so the
+        # next report also covers the day before the break.
+        print(f"Day off ({reason}): no standup.")
         return 0
 
-    cfg = load_config()
     pause_until = cfg.get("PAUSE_UNTIL", "")
     if pause_until and now.date() <= datetime.fromisoformat(pause_until).date() and not args.force:
         # The checkpoint stays put, so the first report back covers the days before the break.
         print(f"Paused until {pause_until}.")
         return 0
 
-    report = Report(since=resolve_since(args.since, now))
+    report = Report(since=resolve_since(args.since, now, calendar))
 
     root = Path(cfg.get("PROJECTS_DIR", "~/Documents")).expanduser()
     repos = find_repos(root, csv(cfg.get("EXCLUDE_REPOS", "")))
@@ -385,6 +449,8 @@ def main() -> int:
                      cfg.get("JIRA_JQL", "assignee = currentUser() AND statusCategory != Done "
                                          "ORDER BY updated DESC"))
 
+    if calendar.error:
+        report.errors.append(calendar.error)
     message = render_template(report)
     # With nothing done there is nothing to summarize, and an LLM would fill the gap
     # with plausible but invented work. The plain template says it honestly.
