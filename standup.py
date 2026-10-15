@@ -30,6 +30,14 @@ from pathlib import Path
 CONFIG_PATH = Path(os.environ.get("STANDUP_CONFIG", "~/.config/standup-bot/config.env")).expanduser()
 STATE_PATH = Path("~/.local/state/standup-bot/last_run").expanduser()
 BIRTHDAY_STATE_PATH = STATE_PATH.with_name("last_birthday")
+BIRTHDAY_PROMPT = """\
+Write a birthday message for a software engineer, delivered by their personal Telegram bot \
+at 5 a.m. on their birthday. Output ONLY the message, in English.
+
+- 2 to 4 short lines, warm and a little playful, like a friend would write it. One or two emojis.
+- A fresh angle each year: don't fall back on the same clichés.
+- No mention of meetings, standups, tasks or productivity: today is not about work.
+- Telegram HTML only: <b> and <i> are allowed, nothing else; no markdown."""
 BIRTHDAY_DEFAULT_MESSAGE = "🎂 <b>Happy birthday!</b>\nWishing you a great day and a great year ahead. 🎉"
 TELEGRAM_LIMIT = 4096
 CMD_TIMEOUT = 60
@@ -357,22 +365,28 @@ Use the project notes only as context: never copy hosts, IPs, credentials \
 or env var names into the update. If the input has an Errors section, append it unchanged at the end."""
 
 
-def render_llm(r: Report, claude_bin: str, model: str) -> str:
-    """Spoken-style summary by Claude. Only commit subjects and titles are sent, never diffs."""
-    cmd = [claude_bin, "-p", "--system-prompt", LLM_SYSTEM_PROMPT, "--tools", "",
+def ask_claude(cfg: dict[str, str], system_prompt: str, data: str) -> str:
+    """One-shot Claude call: own system prompt, no tools, no saved session."""
+    cmd = [os.path.expanduser(cfg.get("CLAUDE_BIN", "~/.local/bin/claude")), "-p",
+           "--system-prompt", system_prompt, "--tools", "",
            "--output-format", "text", "--no-session-persistence"]
-    if model:
-        cmd += ["--model", model]
-    # Neutral cwd: no project CLAUDE.md to leak into the summary.
+    if cfg.get("CLAUDE_MODEL"):
+        cmd += ["--model", cfg["CLAUDE_MODEL"]]
+    # Neutral cwd: no project CLAUDE.md to leak into the output.
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = render_template(r)
-    if r.memory:  # the LLM gets the full notes; the template only the description
-        data += "\n\n# Project notes updated in this period (status, decisions, what is pending)\n"
-        data += "\n\n".join(f"## {project}: {desc}\n{body}" for project, desc, body in r.memory)
     out = run(cmd, cwd=STATE_PATH.parent, stdin=data, timeout=300).strip()
     if not out:
         raise RuntimeError("empty response")
     return out
+
+
+def render_llm(r: Report, cfg: dict[str, str]) -> str:
+    """Spoken-style summary by Claude. Only commit subjects and titles are sent, never diffs."""
+    data = render_template(r)
+    if r.memory:  # the LLM gets the full notes; the template only the description
+        data += "\n\n# Project notes updated in this period (status, decisions, what is pending)\n"
+        data += "\n\n".join(f"## {project}: {desc}\n{body}" for project, desc, body in r.memory)
+    return ask_claude(cfg, LLM_SYSTEM_PROMPT, data)
 
 
 # ---------------------------------------------------------------- deliver
@@ -431,11 +445,20 @@ def send_birthday(cfg: dict[str, str], today: date, dry_run: bool) -> None:
     if BIRTHDAY_STATE_PATH.exists() and BIRTHDAY_STATE_PATH.read_text().strip() == str(today.year):
         return
     message = cfg.get("BIRTHDAY_MESSAGE", "").replace("\\n", "\n") or BIRTHDAY_DEFAULT_MESSAGE
+    if cfg.get("LLM_ENABLED", "false") == "true":
+        try:
+            message = ask_claude(cfg, BIRTHDAY_PROMPT, f"Today is {today:%A, %B %d, %Y}.")
+        except Exception as exc:  # the fixed message is the fallback
+            print(f"birthday: Claude unavailable ({exc}), sending the fixed message", file=sys.stderr)
     if dry_run:
         print(message, end="\n\n")
         return
     try:
-        send_telegram(*telegram_credentials(cfg), message)
+        token, chat_id = telegram_credentials(cfg)
+        try:
+            send_telegram(token, chat_id, message)
+        except RuntimeError:  # most likely invalid HTML from Claude
+            send_telegram(token, chat_id, message, parse_mode=None)
     except Exception as exc:  # a failed greeting must not block the standup report
         print(f"birthday: {exc}", file=sys.stderr)
         return
@@ -503,8 +526,7 @@ def main() -> int:
     # with plausible but invented work. The plain template says it honestly.
     if cfg.get("LLM_ENABLED", "false") == "true" and not args.no_llm and report.has_activity():
         try:
-            message = render_llm(report, os.path.expanduser(cfg.get("CLAUDE_BIN", "~/.local/bin/claude")),
-                                 cfg.get("CLAUDE_MODEL", ""))
+            message = render_llm(report, cfg)
         except Exception as exc:  # if the LLM fails, the template is sent anyway
             message += f"\n\n⚠️ LLM unavailable: {html.escape(str(exc))}"
 

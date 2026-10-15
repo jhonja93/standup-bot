@@ -40,13 +40,27 @@ class SendBirthdayTest(unittest.TestCase):
     @mock.patch.object(standup, "send_telegram", side_effect=RuntimeError("network down"))
     def test_failed_send_is_retried_on_the_next_run(self, send):
         send_birthday(self.cfg, date(2026, 12, 27), dry_run=False)
+        attempts_per_run = send.call_count
         send_birthday(self.cfg, date(2026, 12, 27), dry_run=False)
-        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_count, 2 * attempts_per_run)  # not marked as sent
 
     @mock.patch.object(standup, "send_telegram")
     def test_custom_message_supports_line_breaks(self, send):
         send_birthday({**self.cfg, "BIRTHDAY_MESSAGE": "Hi\\nthere"}, date(2026, 12, 27), dry_run=False)
         self.assertEqual(send.call_args.args[2], "Hi\nthere")
+
+    @mock.patch.object(standup, "send_telegram")
+    @mock.patch.object(standup, "ask_claude", return_value="🎂 From Claude")
+    def test_claude_writes_the_message_when_llm_is_enabled(self, ask, send):
+        send_birthday({**self.cfg, "LLM_ENABLED": "true"}, date(2026, 12, 27), dry_run=False)
+        self.assertEqual(send.call_args.args[2], "🎂 From Claude")
+
+    @mock.patch.object(standup, "send_telegram")
+    @mock.patch.object(standup, "ask_claude", side_effect=RuntimeError("timeout"))
+    def test_falls_back_to_fixed_message_when_claude_fails(self, ask, send):
+        cfg = {**self.cfg, "LLM_ENABLED": "true", "BIRTHDAY_MESSAGE": "Fixed"}
+        send_birthday(cfg, date(2026, 12, 27), dry_run=False)
+        self.assertEqual(send.call_args.args[2], "Fixed")
 
 
 if __name__ == "__main__":

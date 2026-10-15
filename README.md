@@ -33,7 +33,7 @@ Jira (acli)           ┘
 - **One pipeline, independent stages.** Each source fails on its own: if Jira is down you still get your commits, and the error is listed at the end of the message.
 - **Time window = since the last successful send**, not "yesterday". Monday's report covers Friday through Sunday, and a failed day is picked up by the next run. The checkpoint only moves after Telegram confirms delivery.
 - **Workdays only.** The timer fires every day, and the script skips weekends and the public holidays of any country in `HOLIDAY_COUNTRIES`. Keeping that decision in the script, not the timer, keeps all the calendar logic in one place. The report after a day off covers the day off too.
-- **Birthday greeting.** On `BIRTHDAY` you get a greeting, even on weekends, holidays and pauses, at most once per year.
+- **Birthday greeting.** On `BIRTHDAY` you get a greeting written by Claude (if `LLM_ENABLED`), even on weekends, holidays and pauses, at most once per year.
 - **Moved holidays.** Countries like Ecuador move holidays (Saturday → Friday, Sunday → Monday, Tuesday → Monday, Wednesday/Thursday → Friday). The [`holidays`](https://github.com/vacanza/holidays) package knows these rules; the original date counts as a workday again. Holidays moved by a one-off decree go in `EXTRA_DAYS_OFF` / `EXTRA_WORKDAYS`.
 - **Survives a sleeping PC.** If the machine is off or suspended at 05:00, the report runs as soon as it's back.
 - **Honest on empty days.** If you did nothing in the window (vacation, a day of meetings), the report says *no recorded activity* and lists your open tickets. Claude is skipped on those days, because with nothing to summarize it would fill the gap with plausible but invented work. Open tickets are plans, so they never count as work done.
@@ -94,7 +94,7 @@ Each optional source can be turned off in the config.
 | `EXTRA_DAYS_OFF` | — | Comma-separated `YYYY-MM-DD` dates to skip: holidays moved by decree, company days off. |
 | `EXTRA_WORKDAYS` | — | Comma-separated `YYYY-MM-DD` dates to run on even if they are holidays. |
 | `BIRTHDAY` | — | `MM-DD`. Sends a greeting that day, whatever the day. Feb 29 is celebrated on Feb 28 in common years. |
-| `BIRTHDAY_MESSAGE` | a short greeting | Custom greeting, Telegram HTML on one line, `\n` for line breaks. |
+| `BIRTHDAY_MESSAGE` | a short greeting | Fixed greeting, used when Claude is disabled or fails. Telegram HTML on one line, `\n` for line breaks. |
 | `PAUSE_UNTIL` | — | Skip reports through this date (inclusive), e.g. `2026-12-31` for a vacation. |
 | `PROJECTS_DIR` | `~/Documents` | Folder whose direct subfolders are git repos. |
 | `GIT_EMAILS` | — | Comma-separated author emails to include. |
