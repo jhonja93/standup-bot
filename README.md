@@ -34,6 +34,8 @@ Jira (acli)           ┘
 - **Time window = since the last successful send**, not "yesterday". Monday's report covers Friday through Sunday, and a failed day is picked up by the next run. The checkpoint only moves after Telegram confirms delivery.
 - **Weekdays only.** The timer fires Mon–Fri, and the script also refuses to run on weekends. That second check is needed because `Persistent=true` would otherwise run a missed Friday report when you boot on Saturday.
 - **Survives a sleeping PC.** If the machine is off or suspended at 05:00, the report runs as soon as it's back.
+- **Honest on empty days.** If you did nothing in the window (vacation, a day of meetings), the report says *no recorded activity* and lists your open tickets. Claude is skipped on those days, because with nothing to summarize it would fill the gap with plausible but invented work. Open tickets are plans, so they never count as work done.
+- **Your actions, not your PRs' activity.** A PR counts only if you opened, merged or closed it within the window, and a review only if you submitted it then. Someone commenting on your PR doesn't make it your work.
 - **Low noise.** Only your commits (matched by author email), no stashes, no release PRs titled `develop`/`main`, and only uncommitted files touched within the window.
 
 ## Requirements
@@ -85,6 +87,7 @@ Each optional source can be turned off in the config.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. |
 | `TELEGRAM_CHAT_ID` | — | Chat that receives the report. |
+| `PAUSE_UNTIL` | — | Skip reports through this date (inclusive), e.g. `2026-12-31` for a vacation. |
 | `PROJECTS_DIR` | `~/Documents` | Folder whose direct subfolders are git repos. |
 | `GIT_EMAILS` | — | Comma-separated author emails to include. |
 | `EXCLUDE_REPOS` | — | Comma-separated folder names to skip (forks, vendored code). |

@@ -95,6 +95,10 @@ class Report:
     memory: list[tuple[str, str, str]] = field(default_factory=list)  # (project, description, body)
     errors: list[str] = field(default_factory=list)
 
+    def has_activity(self) -> bool:
+        """Anything you actually did in the window. Open Jira tickets don't count."""
+        return any([self.commits, self.prs, self.reviews, self.dirty, self.memory])
+
 
 def run(cmd: list[str], cwd: Path | None = None, stdin: str | None = None,
         timeout: int = CMD_TIMEOUT) -> str:
@@ -149,8 +153,17 @@ def collect_git(report: Report, repos: list[Path], emails: list[str]) -> None:
 
 
 def collect_github(report: Report) -> None:
+    """PRs you opened, merged or closed, and PRs you reviewed, within the window.
+
+    GitHub's `updated` filter only has day granularity and fires on any change (a comment,
+    a CI status), so it's just a coarse pre-filter; the exact check happens here.
+    """
     day = report.since.date().isoformat()
-    fields = "repository,title,state,number,isDraft"
+    fields = "repository,title,state,number,isDraft,createdAt,closedAt"
+
+    def within(timestamp: str | None) -> bool:
+        return bool(timestamp) and datetime.fromisoformat(timestamp.replace("Z", "+00:00")) >= report.since
+
     try:
         authored = json.loads(run(["gh", "search", "prs", "--author=@me", f"--updated=>={day}",
                                    "--json", fields, "--limit", "30"]))
@@ -158,15 +171,26 @@ def collect_github(report: Report) -> None:
         for pr in authored:
             if pr["title"].strip().lower() in RELEASE_PR_TITLES:
                 continue
-            state = "draft" if pr["isDraft"] else pr["state"]
-            report.prs.append(f"[{state}] {pr['repository']['name']}#{pr['number']} {pr['title']}")
+            if pr["state"] in ("merged", "closed") and within(pr["closedAt"]):
+                action = pr["state"]
+            elif within(pr["createdAt"]):
+                action = "opened (draft)" if pr["isDraft"] else "opened"
+            else:
+                continue  # touched by someone else, not by you
+            report.prs.append(f"[{action}] {pr['repository']['name']}#{pr['number']} {pr['title']}")
 
         reviewed = json.loads(run(["gh", "search", "prs", "--reviewed-by=@me", f"--updated=>={day}",
                                    "--json", fields, "--limit", "30"]))
+        login = run(["gh", "api", "user", "--jq", ".login"]).strip()
         for pr in reviewed:
             if (pr["repository"]["name"], pr["number"]) in mine:
                 continue
-            report.reviews.append(f"{pr['repository']['name']}#{pr['number']} {pr['title']}")
+            # The search can't tell when you reviewed, so check the reviews themselves.
+            repo = pr["repository"]["nameWithOwner"]
+            submitted = run(["gh", "api", "--paginate", f"repos/{repo}/pulls/{pr['number']}/reviews",
+                             "--jq", f'.[] | select(.user.login == "{login}") | .submitted_at'])
+            if any(within(t) for t in submitted.split()):
+                report.reviews.append(f"{pr['repository']['name']}#{pr['number']} {pr['title']}")
     except Exception as exc:
         report.errors.append(f"github: {exc}")
 
@@ -226,8 +250,10 @@ def render_template(r: Report) -> str:
         for repo, lines in r.commits.items():
             out.append(f"<b>{e(repo)}</b>")
             out += [f"  • {e(l)}" for l in lines]
-    else:
+    elif r.has_activity():
         out.append("  (no commits)")
+    else:
+        out.append("  (no recorded activity)")
     if r.prs:
         out += ["", "<b>🔀 My PRs</b>"] + [f"  • {e(p)}" for p in r.prs]
     if r.reviews:
@@ -251,7 +277,9 @@ in English, with no preamble, no questions and no comments about the input.
 
 Format (Telegram HTML: only <b> and <i>; no lists, headings or markdown; use "• " for bullets):
 <b>Yesterday</b>
-• 3-6 bullets. Group related commits and PRs into outcomes ("Shipped CSV export for \
+• Up to 6 bullets, built ONLY from commits, PRs, reviews, uncommitted work and project notes. \
+Open Jira tickets are plans, not work done: never use them here. If there is no such activity, \
+write a single bullet "• No recorded activity" and nothing else. Group related commits and PRs into outcomes ("Shipped CSV export for \
 reports (api + web)"); never list commits one by one. Skip trivial ones (lint, \
 wip, typo, merges, release PRs).
 <b>Today</b>
@@ -337,6 +365,12 @@ def main() -> int:
         return 0
 
     cfg = load_config()
+    pause_until = cfg.get("PAUSE_UNTIL", "")
+    if pause_until and now.date() <= datetime.fromisoformat(pause_until).date() and not args.force:
+        # The checkpoint stays put, so the first report back covers the days before the break.
+        print(f"Paused until {pause_until}.")
+        return 0
+
     report = Report(since=resolve_since(args.since, now))
 
     root = Path(cfg.get("PROJECTS_DIR", "~/Documents")).expanduser()
@@ -352,7 +386,9 @@ def main() -> int:
                                          "ORDER BY updated DESC"))
 
     message = render_template(report)
-    if cfg.get("LLM_ENABLED", "false") == "true" and not args.no_llm:
+    # With nothing done there is nothing to summarize, and an LLM would fill the gap
+    # with plausible but invented work. The plain template says it honestly.
+    if cfg.get("LLM_ENABLED", "false") == "true" and not args.no_llm and report.has_activity():
         try:
             message = render_llm(report, os.path.expanduser(cfg.get("CLAUDE_BIN", "~/.local/bin/claude")),
                                  cfg.get("CLAUDE_MODEL", ""))
