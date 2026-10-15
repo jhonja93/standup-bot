@@ -1,0 +1,6 @@
+[Unit]
+Description=Resumen diario para la standup (Telegram)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/Documents/standup-bot/standup.py

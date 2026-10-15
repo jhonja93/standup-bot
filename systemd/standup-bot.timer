@@ -1,0 +1,11 @@
+[Unit]
+Description=Standup bot: lunes a viernes a las 05:00 (hora local)
+
+[Timer]
+OnCalendar=Mon..Fri 05:00
+# Si el PC estaba apagado o suspendido a las 05:00, ejecuta al encender/despertar.
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
