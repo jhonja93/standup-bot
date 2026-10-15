@@ -142,6 +142,14 @@ cat ~/.local/state/standup-bot/last_run          # current window start
 - **Report looks like a raw list:** Claude failed or is disabled. The message ends with `LLM unavailable: …` when it failed.
 - **Missing commits:** check that the author email is in `GIT_EMAILS` (`git log --format='%ae' | sort -u`). Commits made on another machine only show up after a `git fetch`.
 
+## Tests
+
+```bash
+python3 -m unittest discover tests
+```
+
+The calendar tests pin known US and Ecuador dates, including moved holidays. Run them after upgrading the `holidays` package: if it changes how moved holidays are named, they fail instead of the bot silently skipping workdays.
+
 ## Uninstall
 
 ```bash
