@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Resumen diario para la standup: commits, PRs, trabajo sin commitear y tickets de Jira.
+"""Daily standup summary: commits, PRs, uncommitted work, Claude Code notes and Jira tickets.
 
-Pipeline:  collect (git / gh / jira)  ->  render (plantilla o LLM)  ->  deliver (Telegram o stdout)
+Pipeline:  collect (git / gh / memory / jira)  ->  render (template or LLM)  ->  deliver (Telegram or stdout)
 
-Uso:
-    standup.py              # ejecución normal (la que lanza el timer)
-    standup.py --dry-run    # imprime el mensaje, no envía nada ni mueve el checkpoint
-    standup.py --since 2026-10-10T00:00   # fuerza la ventana de tiempo
-    standup.py --force      # ejecuta aunque sea fin de semana
-    standup.py --no-checkpoint   # envía de prueba sin alterar la ventana del próximo reporte
+Usage:
+    standup.py              # normal run (what the timer launches)
+    standup.py --dry-run    # print the message; send nothing, don't move the checkpoint
+    standup.py --since 2026-10-10T00:00   # force the start of the time window
+    standup.py --force      # run even on a weekend
+    standup.py --no-checkpoint   # send a test without changing the next report's window
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ JIRA_STATUS_ORDER = ["In Progress", "In Review", "Blocked", "To Do"]
 # ---------------------------------------------------------------- config
 
 def load_config() -> dict[str, str]:
-    """Lee un archivo KEY=VALUE. Las variables de entorno tienen prioridad."""
+    """Read a KEY=VALUE file. Environment variables take precedence."""
     cfg: dict[str, str] = {}
     if CONFIG_PATH.exists():
         for line in CONFIG_PATH.read_text().splitlines():
@@ -59,9 +59,9 @@ def csv(value: str) -> list[str]:
 # ---------------------------------------------------------------- time window
 
 def previous_workday_start(now: datetime) -> datetime:
-    """Inicio (00:00) del día hábil anterior. El lunes devuelve el viernes."""
+    """Start (00:00) of the previous workday. On Monday it returns Friday."""
     day = now - timedelta(days=1)
-    while day.weekday() >= 5:  # 5 = sábado, 6 = domingo
+    while day.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
         day -= timedelta(days=1)
     return day.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -92,7 +92,7 @@ class Report:
     prs: list[str] = field(default_factory=list)
     reviews: list[str] = field(default_factory=list)
     jira: list[str] = field(default_factory=list)
-    memory: list[tuple[str, str, str]] = field(default_factory=list)  # (proyecto, descripción, cuerpo)
+    memory: list[tuple[str, str, str]] = field(default_factory=list)  # (project, description, body)
     errors: list[str] = field(default_factory=list)
 
 
@@ -112,8 +112,8 @@ def collect_git(report: Report, repos: list[Path], emails: list[str]) -> None:
     author_args = [f"--author={e}" for e in emails]
     for repo in repos:
         try:
-            # --since filtra por fecha de commit; además filtramos por fecha de autor
-            # para que un rebase no vuelva a mostrar trabajo viejo.
+            # --since filters by commit date; we also filter by author date
+            # so a rebase doesn't bring back old work.
             out = run(
                 ["git", "log", "--branches", "--remotes", "--no-merges", f"--since={report.since.isoformat()}",
                  *author_args, "--format=%aI%x09%S%x09%s"],
@@ -129,10 +129,10 @@ def collect_git(report: Report, repos: list[Path], emails: list[str]) -> None:
                 branch = ref.removeprefix("refs/heads/").removeprefix("refs/remotes/").removeprefix("origin/")
                 lines.append(f"{subject} ({branch})")
             if lines:
-                report.commits[repo.name] = list(reversed(lines))  # orden cronológico
+                report.commits[repo.name] = list(reversed(lines))  # chronological order
 
-            # Solo cuenta archivos tocados dentro de la ventana; si no, un repo con
-            # basura sin commitear de hace meses aparecería todos los días.
+            # Only count files touched within the window; otherwise a repo with
+            # months-old uncommitted leftovers would show up every day.
             status = run(["git", "status", "--porcelain", "-z", "--untracked-files=all"], cwd=repo)
             recent = 0
             for entry in filter(None, status.split("\0")):
@@ -140,7 +140,7 @@ def collect_git(report: Report, repos: list[Path], emails: list[str]) -> None:
                 try:
                     if datetime.fromtimestamp(path.stat().st_mtime).astimezone() >= report.since:
                         recent += 1
-                except OSError:  # archivo borrado: también es trabajo en curso
+                except OSError:  # deleted file: also work in progress
                     recent += 1
             if recent:
                 report.dirty[repo.name] = recent
@@ -184,13 +184,11 @@ def collect_jira(report: Report, acli: str, jql: str) -> None:
         report.errors.append(f"jira: {exc}")
 
 
-# ---------------------------------------------------------------- render
-
 def collect_memory(report: Report, root: Path, exclude: list[str], max_body: int = 1500) -> None:
-    """Memorias de Claude Code (tipo `project`) modificadas dentro de la ventana.
+    """Claude Code memories (type `project`) modified within the window.
 
-    Claude Code guarda cada proyecto en ~/.claude/projects/<ruta con / y . cambiados por ->/memory/.
-    Aportan contexto que git no tiene: decisiones, qué está en prod y qué falta, a quién se espera.
+    Claude Code stores each project in ~/.claude/projects/<path with / and . replaced by ->/memory/.
+    They add context git doesn't have: decisions, what's in prod and what's pending, who we're waiting on.
     """
     projects_dir = Path("~/.claude/projects").expanduser()
     encoded_root = re.sub(r"[^A-Za-z0-9]", "-", str(root))
@@ -207,7 +205,7 @@ def collect_memory(report: Report, root: Path, exclude: list[str], max_body: int
                 text = note.read_text(errors="replace")
                 front, _, body = text.partition("\n---\n") if text.startswith("---") else ("", "", text)
                 if not re.search(r"^\s*type:\s*project\b", front, re.M):
-                    continue  # feedback / user / reference no describen trabajo
+                    continue  # feedback / user / reference notes don't describe work
                 desc = re.search(r"^description:\s*(.+)$", front, re.M)
                 desc_text = desc.group(1).strip().strip('"\'') if desc else note.stem
                 report.memory.append((name, desc_text, body.strip()[:max_body]))
@@ -215,8 +213,10 @@ def collect_memory(report: Report, root: Path, exclude: list[str], max_body: int
         report.errors.append(f"memory: {exc}")
 
 
+# ---------------------------------------------------------------- render
+
 def render_template(r: Report) -> str:
-    """Formato determinista en HTML de Telegram. Siempre funciona, sin dependencias externas."""
+    """Deterministic Telegram HTML format. Always works, no external dependencies."""
     e = html.escape
     out = [f"<b>🗓 Standup — {datetime.now():%a %b %d}</b>",
            f"<i>Since {r.since:%a %b %d, %H:%M}</i>", ""]
@@ -268,15 +268,15 @@ or env var names into the update. If the input has an Errors section, append it 
 
 
 def render_llm(r: Report, claude_bin: str, model: str) -> str:
-    """Resumen hablado con Claude. Solo envía mensajes de commit y títulos, nunca diffs."""
+    """Spoken-style summary by Claude. Only commit subjects and titles are sent, never diffs."""
     cmd = [claude_bin, "-p", "--system-prompt", LLM_SYSTEM_PROMPT, "--tools", "",
            "--output-format", "text", "--no-session-persistence"]
     if model:
         cmd += ["--model", model]
-    # cwd neutral: sin CLAUDE.md de proyecto que contamine el resumen.
+    # Neutral cwd: no project CLAUDE.md to leak into the summary.
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = render_template(r)
-    if r.memory:  # el LLM recibe las notas completas; la plantilla solo la descripción
+    if r.memory:  # the LLM gets the full notes; the template only the description
         data += "\n\n# Project notes updated in this period (status, decisions, what is pending)\n"
         data += "\n\n".join(f"## {project}: {desc}\n{body}" for project, desc, body in r.memory)
     out = run(cmd, cwd=STATE_PATH.parent, stdin=data, timeout=300).strip()
@@ -306,7 +306,7 @@ def send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None = 
         if parse_mode:
             payload["parse_mode"] = parse_mode
         data = urllib.parse.urlencode(payload).encode()
-        for attempt in range(3):  # tras despertar de suspensión la red puede tardar en levantar
+        for attempt in range(3):  # after resuming from suspend the network may take a while to come up
             try:
                 with urllib.request.urlopen(url, data=data, timeout=20) as resp:
                     if json.load(resp).get("ok"):
@@ -321,19 +321,19 @@ def send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None = 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dry-run", action="store_true", help="imprime en vez de enviar")
-    parser.add_argument("--since", help="inicio de la ventana (ISO 8601)")
-    parser.add_argument("--force", action="store_true", help="ejecutar aunque sea fin de semana")
+    parser.add_argument("--dry-run", action="store_true", help="print instead of sending")
+    parser.add_argument("--since", help="start of the time window (ISO 8601)")
+    parser.add_argument("--force", action="store_true", help="run even on a weekend")
     parser.add_argument("--no-checkpoint", action="store_true",
-                        help="envía pero no mueve la ventana (para pruebas manuales)")
-    parser.add_argument("--no-llm", action="store_true", help="usar solo la plantilla")
+                        help="send without moving the window (for manual tests)")
+    parser.add_argument("--no-llm", action="store_true", help="use the plain template only")
     args = parser.parse_args()
 
     now = datetime.now().astimezone()
     if now.weekday() >= 5 and not args.force:
-        # El timer solo dispara L-V, pero Persistent=true puede recuperar una ejecución
-        # perdida del viernes al encender el sábado. No queremos eso.
-        print("Fin de semana: no hay standup.")
+        # The timer only fires Mon-Fri, but Persistent=true can catch up a missed
+        # Friday run when the PC boots on Saturday. We don't want that.
+        print("Weekend: no standup.")
         return 0
 
     cfg = load_config()
@@ -356,7 +356,7 @@ def main() -> int:
         try:
             message = render_llm(report, os.path.expanduser(cfg.get("CLAUDE_BIN", "~/.local/bin/claude")),
                                  cfg.get("CLAUDE_MODEL", ""))
-        except Exception as exc:  # si el LLM falla, se envía la plantilla igualmente
+        except Exception as exc:  # if the LLM fails, the template is sent anyway
             message += f"\n\n⚠️ LLM unavailable: {html.escape(str(exc))}"
 
     if args.dry_run:
@@ -365,15 +365,15 @@ def main() -> int:
 
     token, chat_id = cfg.get("TELEGRAM_BOT_TOKEN"), cfg.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
-        print(f"Faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID en {CONFIG_PATH}", file=sys.stderr)
+        print(f"Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in {CONFIG_PATH}", file=sys.stderr)
         return 1
     try:
         send_telegram(token, chat_id, message)
     except RuntimeError:
-        # Lo más probable: HTML inválido generado por el LLM. Reintenta en texto plano.
+        # Most likely invalid HTML from the LLM. Retry as plain text.
         send_telegram(token, chat_id, message, parse_mode=None)
     if not args.no_checkpoint:
-        save_checkpoint(now)  # solo avanzamos la ventana si el envío fue exitoso
+        save_checkpoint(now)  # only move the window after a successful send
     return 0
 
 

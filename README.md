@@ -142,3 +142,7 @@ rm ~/.config/systemd/user/standup-bot.{service,timer}
 rm -r ~/.config/standup-bot ~/.local/state/standup-bot
 systemctl --user daemon-reload
 ```
+
+## License
+
+[MIT](LICENSE)

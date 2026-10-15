@@ -1,5 +1,5 @@
 [Unit]
-Description=Resumen diario para la standup (Telegram)
+Description=Daily standup summary (Telegram)
 
 [Service]
 Type=oneshot

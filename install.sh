@@ -7,16 +7,16 @@ units="$HOME/.config/systemd/user"
 mkdir -p "$(dirname "$cfg")" "$units"
 if [[ ! -f "$cfg" ]]; then
   install -m 600 "$here/config.example.env" "$cfg"
-  echo "Configuración creada en $cfg — añade TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID."
+  echo "Config created at $cfg — add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."
 fi
 
-# El .service se genera con la ruta real del clon (puede no estar en ~/Documents).
+# Generate the .service with the clone's real path (it may not live in ~/Documents).
 sed "s|%h/Documents/standup-bot|$here|" "$here/systemd/standup-bot.service" > "$units/standup-bot.service"
 ln -sf "$here/systemd/standup-bot.timer" "$units/"
 systemctl --user daemon-reload
 systemctl --user enable --now standup-bot.timer
 
-# Permite que los timers de usuario corran aunque no hayas iniciado sesión.
+# Let user timers run even when you're not logged in.
 loginctl enable-linger "$USER"
 
 systemctl --user list-timers standup-bot.timer
