@@ -1,8 +1,10 @@
 [Unit]
-Description=Standup bot: Monday to Friday at 05:00 (local time)
+Description=Standup bot: every day at 05:00 (local time)
 
 [Timer]
-OnCalendar=Mon..Fri 05:00
+# Every day, not Mon..Fri: the script skips weekends and holidays itself, and
+# still sends the birthday greeting on those days.
+OnCalendar=*-*-* 05:00
 # If the PC was off or suspended at 05:00, run on boot/resume.
 Persistent=true
 RandomizedDelaySec=60

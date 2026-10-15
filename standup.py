@@ -29,6 +29,8 @@ from pathlib import Path
 
 CONFIG_PATH = Path(os.environ.get("STANDUP_CONFIG", "~/.config/standup-bot/config.env")).expanduser()
 STATE_PATH = Path("~/.local/state/standup-bot/last_run").expanduser()
+BIRTHDAY_STATE_PATH = STATE_PATH.with_name("last_birthday")
+BIRTHDAY_DEFAULT_MESSAGE = "🎂 <b>Happy birthday!</b>\nWishing you a great day and a great year ahead. 🎉"
 TELEGRAM_LIMIT = 4096
 CMD_TIMEOUT = 60
 RELEASE_PR_TITLES = {"develop", "main", "master", "release", "staging"}
@@ -405,6 +407,49 @@ def send_telegram(token: str, chat_id: str, text: str, parse_mode: str | None = 
                 time.sleep(15 * (attempt + 1))
 
 
+# ---------------------------------------------------------------- birthday
+
+def is_birthday(today: date, month_day: str) -> bool:
+    """`month_day` is MM-DD. A Feb 29 birthday is celebrated on Feb 28 in common years."""
+    month, day = (int(x) for x in month_day.split("-"))
+    if (month, day) == (2, 29) and not is_leap(today.year):
+        day = 28
+    return (today.month, today.day) == (month, day)
+
+
+def is_leap(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def send_birthday(cfg: dict[str, str], today: date, dry_run: bool) -> None:
+    """Greeting on BIRTHDAY, whatever the day: weekends, holidays and pauses don't apply.
+
+    Sent at most once per year, so a manual run or a catch-up run doesn't repeat it.
+    """
+    if not cfg.get("BIRTHDAY") or not is_birthday(today, cfg["BIRTHDAY"]):
+        return
+    if BIRTHDAY_STATE_PATH.exists() and BIRTHDAY_STATE_PATH.read_text().strip() == str(today.year):
+        return
+    message = cfg.get("BIRTHDAY_MESSAGE", "").replace("\\n", "\n") or BIRTHDAY_DEFAULT_MESSAGE
+    if dry_run:
+        print(message, end="\n\n")
+        return
+    try:
+        send_telegram(*telegram_credentials(cfg), message)
+    except Exception as exc:  # a failed greeting must not block the standup report
+        print(f"birthday: {exc}", file=sys.stderr)
+        return
+    BIRTHDAY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BIRTHDAY_STATE_PATH.write_text(str(today.year))
+
+
+def telegram_credentials(cfg: dict[str, str]) -> tuple[str, str]:
+    token, chat_id = cfg.get("TELEGRAM_BOT_TOKEN"), cfg.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        raise RuntimeError(f"Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in {CONFIG_PATH}")
+    return token, chat_id
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> int:
@@ -421,11 +466,13 @@ def main() -> int:
     cfg = load_config()
     calendar = Calendar(csv(cfg.get("HOLIDAY_COUNTRIES", "")), csv(cfg.get("EXTRA_DAYS_OFF", "")),
                         csv(cfg.get("EXTRA_WORKDAYS", "")))
+    send_birthday(cfg, now.date(), args.dry_run)
+
     reason = calendar.day_off(now.date())
     if reason and not args.force:
-        # The timer only fires Mon-Fri, but Persistent=true can catch up a missed Friday run
-        # on Saturday, and holidays need this check anyway. The checkpoint stays put, so the
-        # next report also covers the day before the break.
+        # The timer fires every day (for the birthday greeting), so this is what keeps
+        # weekends and holidays quiet. The checkpoint stays put, so the next report also
+        # covers the day before the break.
         print(f"Day off ({reason}): no standup.")
         return 0
 
@@ -465,9 +512,10 @@ def main() -> int:
         print(message)
         return 0
 
-    token, chat_id = cfg.get("TELEGRAM_BOT_TOKEN"), cfg.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        print(f"Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in {CONFIG_PATH}", file=sys.stderr)
+    try:
+        token, chat_id = telegram_credentials(cfg)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
         return 1
     try:
         send_telegram(token, chat_id, message)
