@@ -10,7 +10,8 @@ if [[ ! -f "$cfg" ]]; then
   echo "Configuración creada en $cfg — añade TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID."
 fi
 
-ln -sf "$here/systemd/standup-bot.service" "$units/"
+# El .service se genera con la ruta real del clon (puede no estar en ~/Documents).
+sed "s|%h/Documents/standup-bot|$here|" "$here/systemd/standup-bot.service" > "$units/standup-bot.service"
 ln -sf "$here/systemd/standup-bot.timer" "$units/"
 systemctl --user daemon-reload
 systemctl --user enable --now standup-bot.timer
